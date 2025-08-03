@@ -1,0 +1,137 @@
+import yfinance as yf
+import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import datetime
+
+# Variables to modify
+sell_spy_percent_drop = 0.05  # Percentage of SPY to sell when UPRO grows more or drops less (2%)
+sell_upro_percent_drop = 0.05  # Percentage of UPRO to sell when SPY grows more or drops less (2%)
+
+# Parameters
+initial_investment_lump = 100000  # $100,000 lump sum per asset for lump strategies
+initial_investment_dynamic = 50000  # $50,000 per asset for dynamic strategy, total $100,000
+
+# Download historical data for SPY and UPRO
+spy = yf.Ticker("SPY").history(period="max")
+upro = yf.Ticker("UPRO").history(period="max")
+data = pd.concat([spy['Close'].rename('SPY'), upro['Close'].rename('UPRO')], axis=1).dropna()
+data.index = pd.to_datetime(data.index)
+
+# Function to initialize strategies for a given start date
+def initialize_strategies(start_date, df):
+    available_dates = df.index[df.index >= start_date]
+    if not available_dates.empty:
+        start_date = available_dates[0]
+        start_price_spy = df.loc[start_date, 'SPY']
+        start_price_upro = df.loc[start_date, 'UPRO']
+        strategies = {
+            'SPY_Lump': {'shares': initial_investment_lump / start_price_spy, 'value': []},
+            'UPRO_Lump': {'shares': initial_investment_lump / start_price_upro, 'value': []},
+            'Dynamic_Strategy': {
+                'spy_shares': initial_investment_dynamic / start_price_spy,
+                'upro_shares': initial_investment_dynamic / start_price_upro,
+                'total_value': [],
+                'spy_value_history': [],
+                'upro_value_history': []
+            }
+        }
+        return strategies
+    raise ValueError(f"No data available starting from {start_date}")
+
+# Process data for each period
+periods = [
+    ('2010-01-01', '2014-12-31', '2010-2014'),
+    ('2015-01-01', '2019-12-31', '2015-2019'),
+    ('2020-01-01', '2025-08-03', '2020-2025')
+]
+
+for start_date, end_date, period_title in periods:
+    period_data = data[(data.index >= start_date) & (data.index <= end_date)].copy()
+    
+    try:
+        strategies = initialize_strategies(start_date, period_data)
+    except ValueError as e:
+        print(f"Error for period {period_title}: {e}")
+        continue
+    
+    for i in range(len(period_data)):
+        date = period_data.index[i]
+        spy_price = period_data['SPY'].iloc[i]
+        upro_price = period_data['UPRO'].iloc[i]
+        
+        # Lump sum baselines (no rebalancing)
+        spy_lump_value = strategies['SPY_Lump']['shares'] * spy_price
+        strategies['SPY_Lump']['value'].append(spy_lump_value)
+        upro_lump_value = strategies['UPRO_Lump']['shares'] * upro_price
+        strategies['UPRO_Lump']['value'].append(upro_lump_value)
+        
+        # Dynamic Strategy
+        strategy = strategies['Dynamic_Strategy']
+        
+        # Calculate current values
+        current_spy_value = strategy['spy_shares'] * spy_price
+        current_upro_value = strategy['upro_shares'] * upro_price
+        total_value = current_spy_value + current_upro_value
+        
+        # Rebalancing logic
+        if i > 0:
+            prev_spy_price = period_data['SPY'].iloc[i-1]
+            prev_upro_price = period_data['UPRO'].iloc[i-1]
+            spy_change_percent = (spy_price - prev_spy_price) / prev_spy_price if prev_spy_price > 0 else 0
+            upro_change_percent = (upro_price - prev_upro_price) / prev_upro_price if prev_upro_price > 0 else 0
+            
+            if upro_change_percent > spy_change_percent:  # UPRO grew more or dropped less
+                move_amount = current_spy_value * sell_spy_percent_drop
+                if move_amount > 0 and current_spy_value >= move_amount:
+                    shares_to_sell = move_amount / spy_price
+                    strategy['spy_shares'] -= shares_to_sell
+                    strategy['upro_shares'] += move_amount / upro_price
+            elif spy_change_percent > upro_change_percent:  # SPY grew more or dropped less
+                move_amount = current_upro_value * sell_upro_percent_drop
+                if move_amount > 0 and current_upro_value >= move_amount:
+                    shares_to_sell = move_amount / upro_price
+                    strategy['upro_shares'] -= shares_to_sell
+                    strategy['spy_shares'] += move_amount / spy_price
+        
+        # Record daily values after rebalancing
+        spy_daily_value = strategy['spy_shares'] * spy_price
+        upro_daily_value = strategy['upro_shares'] * upro_price
+        total_value = spy_daily_value + upro_daily_value
+        strategy['spy_value_history'].append(spy_daily_value)
+        strategy['upro_value_history'].append(upro_daily_value)
+        strategy['total_value'].append(total_value)
+    
+    # Create DataFrame for portfolio values for this period
+    portfolio_data = {
+        'SPY_Lump': strategies['SPY_Lump']['value'],
+        'UPRO_Lump': strategies['UPRO_Lump']['value'],
+        'Dynamic_Total': strategies['Dynamic_Strategy']['total_value'],
+        'Dynamic_SPY': strategies['Dynamic_Strategy']['spy_value_history'],
+        'Dynamic_UPRO': strategies['Dynamic_Strategy']['upro_value_history']
+    }
+    portfolio_df = pd.DataFrame(portfolio_data, index=period_data.index)
+    
+    # Plot results for the current period
+    plt.figure(figsize=(14, 7))
+    plt.plot(portfolio_df.index, portfolio_df['SPY_Lump'], label='Lump Sum $100k in SPY', color='blue')
+    plt.plot(portfolio_df.index, portfolio_df['UPRO_Lump'], label='Lump Sum $100k in UPRO', color='red')
+    plt.plot(portfolio_df.index, portfolio_df['Dynamic_Total'], label='Dynamic Total Value', color='green')
+    plt.plot(portfolio_df.index, portfolio_df['Dynamic_SPY'], label='Dynamic SPY Value', color='cyan', linestyle='--')
+    plt.plot(portfolio_df.index, portfolio_df['Dynamic_UPRO'], label='Dynamic UPRO Value', color='magenta', linestyle='--')
+    plt.xlabel('Date')
+    plt.ylabel('Portfolio Value (USD)')
+    plt.title(f'Lump Sum and Dynamic Strategy Comparison: SPY vs UPRO ({period_title})')
+    plt.grid(True)
+    plt.legend(loc='upper left')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
+# Print final portfolio values to terminal
+print("\n=== Lump Sum and Dynamic Strategy Results ===")
+print(f"Final Values as of {data.index[-1].date()} at 09:48 PM +08:")
+print(f"Lump Sum SPY: ${portfolio_df['SPY_Lump'].iloc[-1]:,.2f}")
+print(f"Lump Sum UPRO: ${portfolio_df['UPRO_Lump'].iloc[-1]:,.2f}")
+print(f"Dynamic Total: ${portfolio_df['Dynamic_Total'].iloc[-1]:,.2f}")
+print(f"Dynamic SPY: ${portfolio_df['Dynamic_SPY'].iloc[-1]:,.2f}")
+print(f"Dynamic UPRO: ${portfolio_df['Dynamic_UPRO'].iloc[-1]:,.2f}")
